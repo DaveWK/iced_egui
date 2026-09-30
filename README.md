@@ -93,6 +93,12 @@ WGPU_BACKEND=vulkan cargo run --example plotters --features fira-sans,plotters
 There is no separate Iced backend selection. Browser builds use WebGPU or
 WebGL through wgpu, rather than direct Vulkan access.
 
+## CI
+
+GitHub Actions uses a self-hosted Fedora/RHEL runner for native, Vulkan and
+wasm checks. See [runner setup](docs/SELF-HOSTED-CI.md) for packages, labels
+and registration. Public pull requests do not run automatically on this host.
+
 ## Tests
 
 ```sh
