@@ -54,7 +54,7 @@ jobs:
       - run: cargo check --no-default-features
       - run: cargo test --features fira-sans,plotters,primary-selection
       - name: Vulkan integration test
-        run: cargo test --features fira-sans,plotters,primary-selection --lib -- --ignored --nocapture
+        run: cargo test --features fira-sans,plotters,primary-selection --lib -- --ignored --nocapture --test-threads=1
       - run: cargo doc --no-deps --features fira-sans,plotters,primary-selection
         env:
           RUSTDOCFLAGS: -D warnings

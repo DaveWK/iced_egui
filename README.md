@@ -103,7 +103,7 @@ and registration. Public pull requests do not run automatically on this host.
 
 ```sh
 cargo test --features fira-sans,plotters
-cargo test --features fira-sans,plotters --lib -- --ignored --nocapture
+cargo test --features fira-sans,plotters --lib -- --ignored --nocapture --test-threads=1
 ```
 
 The second command explicitly creates a Vulkan adapter (hardware or Mesa
@@ -130,15 +130,22 @@ cover range validation and coordinate transformations without needing a GPU.
 ## Version pinning
 
 egui and Iced must be on the **same `wgpu` crate version**, since a device
-from one cannot be used by the other. This release pairs:
+from one cannot be used by the other. The experimental `feat/nastyfork-wgpu30`
+branch pairs:
 
 | crate | version | wgpu |
 |---|---|---|
-| egui, eframe, egui-wgpu | 0.33 | 27 |
-| iced_* | 0.14 | 27 |
+| egui, eframe, egui-wgpu | 0.36.2 | 30 |
+| iced_* | 0.14 (forked renderer) | 30 |
+| cryoglyph | 0.1 (fork) | 30 |
+| egui_tiles | 0.17.1 | |
 | plotters-iced2 | 0.14 | |
 
-egui 0.34+ moved to wgpu 29/30; this crate will follow when Iced does.
+This branch requires the two `nastyfork` Git patches at your application workspace
+root. See [docs/NASTYFORK.md](docs/NASTYFORK.md) for pinned dependency configuration,
+port boundaries, validation, and limitations. Cargo does not inherit patches from
+dependencies. `main` retains the original egui 0.33 / wgpu 27 stack. This branch
+is not a crates.io release or a runtime switch between wgpu versions.
 
 ## Web
 
@@ -146,12 +153,13 @@ The library builds for `wasm32-unknown-unknown` with the `webgl` feature,
 **provided nothing in your dependency graph enables wgpu's
 `fragile-send-sync-non-atomic-wasm` feature.** That feature makes wgpu
 demand `Send + Sync` window handles, which `iced_wgpu`'s compositor does
-not provide on wasm32, and `eframe` / `egui-wgpu` enable it by default.
+not provide on wasm32, and `egui-wgpu` defaults and eframe's `wgpu` feature enable it.
+Use eframe's `wgpu_no_default_features` feature instead.
 For a web build use:
 
 ```toml
-eframe = { version = "0.33", default-features = false, features = ["wgpu"] }
-iced_egui = { version = "0.1", features = ["fira-sans", "webgl"] }
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu_no_default_features"] }
+iced_egui = { git = "https://github.com/DaveWK/iced_egui", branch = "feat/nastyfork-wgpu30", features = ["fira-sans", "webgl"] }
 ```
 
 `web-demo/` is a minimal eframe web app wired this way (`trunk serve` in

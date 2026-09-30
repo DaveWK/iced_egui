@@ -102,6 +102,12 @@ fn key_event(
 fn key(k: egui::Key) -> Option<keyboard::Key> {
     use keyboard::key::Named;
     let named = match k {
+        // Text for this physical key arrives through Event::Text.
+        egui::Key::IntlBackslash => return Some(keyboard::Key::Unidentified),
+        egui::Key::ShiftLeft | egui::Key::ShiftRight => Named::Shift,
+        egui::Key::ControlLeft | egui::Key::ControlRight => Named::Control,
+        egui::Key::AltLeft | egui::Key::AltRight => Named::Alt,
+        egui::Key::SuperLeft | egui::Key::SuperRight => Named::Super,
         egui::Key::ArrowLeft => Named::ArrowLeft,
         egui::Key::ArrowRight => Named::ArrowRight,
         egui::Key::ArrowUp => Named::ArrowUp,
@@ -173,6 +179,8 @@ fn key(k: egui::Key) -> Option<keyboard::Key> {
 }
 fn handled(e: &egui::Event) -> bool {
     match e {
+        egui::Event::Ime(egui::ImeEvent::DeleteSurrounding { .. }) => false,
+        egui::Event::ModifiersChanged(_) => true,
         egui::Event::Copy
         | egui::Event::Cut
         | egui::Event::Paste(_)
@@ -242,17 +250,41 @@ pub(crate) fn translate(events: Vec<egui::Event>, current: egui::Modifiers) -> V
                 })
                 .into(),
             ),
+            egui::Event::ModifiersChanged(m) => {
+                out.push(Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers(m))).into())
+            }
             egui::Event::Ime(event) => {
                 use iced_core::input_method::Event as Ime;
-                out.push(
-                    Event::InputMethod(match event {
-                        egui::ImeEvent::Enabled => Ime::Opened,
-                        egui::ImeEvent::Preedit(text) => Ime::Preedit(text, None),
-                        egui::ImeEvent::Commit(text) => Ime::Commit(text),
-                        egui::ImeEvent::Disabled => Ime::Closed,
-                    })
-                    .into(),
-                );
+                #[allow(deprecated)]
+                match event {
+                    egui::ImeEvent::Enabled => out.push(Event::InputMethod(Ime::Opened).into()),
+                    egui::ImeEvent::Disabled => out.push(Event::InputMethod(Ime::Closed).into()),
+                    egui::ImeEvent::Preedit {
+                        text,
+                        active_range_chars,
+                    } => {
+                        if text.is_empty() {
+                            out.push(Event::InputMethod(Ime::Closed).into());
+                        } else {
+                            let selection = active_range_chars.map(|range| {
+                                let offset = |index| {
+                                    text.char_indices()
+                                        .nth(index)
+                                        .map_or(text.len(), |(offset, _)| offset)
+                                };
+                                offset(range.start)..offset(range.end)
+                            });
+                            out.push(Event::InputMethod(Ime::Opened).into());
+                            out.push(Event::InputMethod(Ime::Preedit(text, selection)).into());
+                        }
+                    }
+                    egui::ImeEvent::Commit(text) => {
+                        out.push(Event::InputMethod(Ime::Commit(text)).into());
+                        out.push(Event::InputMethod(Ime::Closed).into());
+                    }
+                    // Iced 0.14 has no scalar-indexed surrounding-text operation.
+                    egui::ImeEvent::DeleteSurrounding { .. } => {}
+                }
             }
             egui::Event::Text(text) => {
                 // Iced TextInput consumes one scalar per KeyPressed text payload.
@@ -307,14 +339,19 @@ mod tests {
         }
         let events = translate(
             vec![
-                egui::Event::Ime(egui::ImeEvent::Enabled),
-                egui::Event::Ime(egui::ImeEvent::Preedit("かな".into())),
+                egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: "かな".into(),
+                    active_range_chars: None,
+                }),
                 egui::Event::Ime(egui::ImeEvent::Commit("仮名".into())),
-                egui::Event::Ime(egui::ImeEvent::Disabled),
+                egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: String::new(),
+                    active_range_chars: None,
+                }),
             ],
             Default::default(),
         );
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 5);
         assert!(
             matches!(&events[2].event,Event::InputMethod(iced_core::input_method::Event::Commit(s)) if s=="仮名")
         );
@@ -323,6 +360,26 @@ mod tests {
                 .iter()
                 .all(|e| !matches!(e.event, Event::Keyboard(_)))
         );
+    }
+    #[test]
+    fn ime_selection_uses_utf8_offsets_and_leaves_unsupported_deletion() {
+        use iced_core::input_method::Event as Ime;
+        let events = translate(
+            vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: "aかなé".into(),
+                active_range_chars: Some(1..3),
+            })],
+            Default::default(),
+        );
+        assert!(
+            matches!(&events[1].event, Event::InputMethod(Ime::Preedit(text,Some(range))) if text=="aかなé" && *range==(1..7))
+        );
+        let deletion = egui::Event::Ime(egui::ImeEvent::DeleteSurrounding {
+            before_chars: 1,
+            after_chars: 0,
+        });
+        assert!(!handled(&deletion));
+        assert!(translate(vec![deletion], Default::default()).is_empty());
     }
     #[test]
     fn primary_failures_do_not_fall_back_to_standard() {
@@ -344,7 +401,7 @@ mod tests {
             cb.primary.borrow_mut().error.take().as_deref(),
             Some("read failed")
         );
-        let output = ctx.run(Default::default(), |_| {
+        let output = crate::run_test_ui(&ctx, Default::default(), |_| {
             cb.write(Kind::Primary, "selection".into())
         });
         assert!(output.platform_output.commands.is_empty());
@@ -358,7 +415,7 @@ mod tests {
     fn clipboard_write_uses_platform_output_and_keeps_primary_separate() {
         let ctx = egui::Context::default();
         let mut cb = EguiClipboard::new(&ctx);
-        let output = ctx.run(Default::default(), |_| {
+        let output = crate::run_test_ui(&ctx, Default::default(), |_| {
             cb.write(Kind::Standard, "café 🦀\nline two".into());
             assert_eq!(
                 cb.read(Kind::Standard).as_deref(),
@@ -424,7 +481,8 @@ mod tests {
     #[test]
     fn only_focused_pane_consumes_editing_input() {
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        let _ = crate::run_test_ui(
+            &ctx,
             egui::RawInput {
                 events: vec![
                     egui::Event::Paste("mine".into()),
@@ -433,15 +491,15 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
-                assert!(take_events(ctx, false).is_empty());
+                assert!(take_events(ctx.ctx(), false).is_empty());
                 assert_eq!(
-                    take_events(ctx, true)
+                    take_events(ctx.ctx(), true)
                         .iter()
                         .filter(|e| e.paste.is_some())
                         .count(),
                     1
                 );
-                assert!(take_events(ctx, true).is_empty());
+                assert!(take_events(ctx.ctx(), true).is_empty());
                 assert_eq!(ctx.input(|i| i.events.len()), 1);
             },
         );
@@ -456,9 +514,9 @@ mod integration {
     #[test]
     #[ignore = "requires a Vulkan adapter; run with --ignored"]
     fn text_input_copy_cut_paste_and_focus() {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) =
@@ -466,6 +524,8 @@ mod integration {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let renderer = egui_wgpu::Renderer::new(&device, format, Default::default());
         let state = egui_wgpu::RenderState {
+            instance,
+            surface_config: egui_wgpu::SurfaceConfig::LOW_LATENCY,
             adapter,
             available_adapters: vec![],
             device,
@@ -482,7 +542,8 @@ mod integration {
         let mut frame = |events: Vec<egui::Event>, value: &mut String| {
             let current = value.clone();
             let mut messages = Vec::new();
-            let output = ctx.run(
+            let output = crate::run_test_ui(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,

@@ -60,11 +60,11 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ctx: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(error) = self.host.take_primary_selection_error() {
             self.clipboard_error = Some(error);
         }
-        egui::SidePanel::left("egui").show(ctx, |ui| {
+        egui::Panel::left("egui").show(ctx, |ui| {
             ui.heading("egui side");
             ui.label("Try Tab, IME composition, copy/cut/paste, the dropdown, and tooltip.");
             ui.label("With primary-selection enabled: select text, then middle-click to paste.");

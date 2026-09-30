@@ -361,9 +361,9 @@ mod gpu_tests {
     #[test]
     #[ignore = "requires a Vulkan adapter; run with --ignored"]
     fn vulkan_render_cache_hover_zoom_and_resize() {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
             .expect("Vulkan adapter");
@@ -373,6 +373,8 @@ mod gpu_tests {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let renderer = egui_wgpu::Renderer::new(&device, format, Default::default());
         let state = egui_wgpu::RenderState {
+            instance,
+            surface_config: egui_wgpu::SurfaceConfig::LOW_LATENCY,
             adapter,
             available_adapters: vec![],
             device: device.clone(),
@@ -388,19 +390,20 @@ mod gpu_tests {
             |pane: &mut IcedPlotPane, source: &Solid, events: Vec<egui::Event>, size, scale| {
                 ctx.set_pixels_per_point(scale);
                 let mut output = None;
-                let _ = ctx.run(
+                let mut events = events;
+                if let Some(modifiers) = events.iter().find_map(|event| match event {
+                    egui::Event::PointerButton { modifiers, .. } => Some(*modifiers),
+                    _ => None,
+                }) {
+                    events.insert(0, egui::Event::ModifiersChanged(modifiers));
+                }
+                let _ = crate::run_test_ui(
+                    &ctx,
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
                             egui::vec2(640.0, 480.0),
                         )),
-                        modifiers: events
-                            .iter()
-                            .find_map(|e| match e {
-                                egui::Event::PointerButton { modifiers, .. } => Some(*modifiers),
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| ctx.input(|i| i.modifiers)),
                         events,
                         ..Default::default()
                     },
@@ -570,7 +573,10 @@ mod gpu_tests {
             });
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
-        let pixel = buffer.slice(..).get_mapped_range();
+        let pixel = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("readback mapped");
         assert!(
             pixel[0] > 200 && pixel[1] < 30 && pixel[2] < 30 && pixel[3] > 200,
             "expected opaque red series pixel, got {:?}",

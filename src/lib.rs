@@ -48,7 +48,7 @@
 //! }
 //!
 //! impl eframe::App for App {
-//!     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+//!     fn ui(&mut self, ctx: &mut egui::Ui, _: &mut eframe::Frame) {
 //!         egui::CentralPanel::default().show(ctx, |ui| {
 //!             let n = self.n;
 //!             let out = self.pane.show(ui, || {
@@ -767,7 +767,9 @@ impl<Message> IcedPane<Message> {
         if focused
             && window_focused
             && let iced_core::InputMethod::Enabled {
-                cursor, preedit, ..
+                cursor,
+                preedit,
+                purpose,
             } = &self.input_method
         {
             let caret = egui::Rect::from_min_size(
@@ -776,6 +778,12 @@ impl<Message> IcedPane<Message> {
             );
             ui.ctx().output_mut(|output| {
                 output.ime = Some(egui::output::IMEOutput {
+                    purpose: match purpose {
+                        iced_core::input_method::Purpose::Normal => egui::IMEPurpose::Normal,
+                        iced_core::input_method::Purpose::Secure => egui::IMEPurpose::Password,
+                        iced_core::input_method::Purpose::Terminal => egui::IMEPurpose::Terminal,
+                    },
+                    should_interrupt_composition: gained_focus,
                     rect,
                     cursor_rect: caret,
                 });
@@ -966,3 +974,16 @@ impl<Message> Drop for IcedPane<Message> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod integration_tests;
+
+#[cfg(test)]
+fn run_test_ui(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    ui: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(input, ui);
+    // This headless harness reads Iced render targets directly and does not
+    // composite egui's own font atlas. Explicitly discard its texture updates.
+    output.textures_delta.clear();
+    output
+}
