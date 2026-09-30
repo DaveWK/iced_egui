@@ -31,6 +31,20 @@ On-screen and browser visual validation remain outstanding. Headless test
 success does not establish hardware performance or cross-browser behavior.
 See GitHub Actions for CI results on the published commit.
 
+## Clipboard follow-up
+
+`src/clipboard.rs` bridges the Iced Clipboard trait to egui CopyText output
+and event-scoped Paste payloads. The focused pane consumes semantic
+Copy/Cut/Paste events, synthesizes Iced command shortcuts with key releases,
+and suppresses duplicate raw shortcuts. Event ordering is preserved for
+multiple pastes per frame. Focus loss clears Iced widget focus.
+
+The widgets example includes both Iced and egui text editors. Tests exercise
+Unicode, empty/multiple pastes, copy/cut, shortcut deduplication, and focus
+transfer to an egui editor. Primary selection and synchronous OS clipboard
+reads are unsupported. Browser/native OS clipboard delivery has not been
+manually validated; integration tests assert the platform output boundary.
+
 ## Compatibility constraints
 
 - egui/eframe/egui-wgpu 0.33 and Iced 0.14 share wgpu 27.
@@ -63,7 +77,8 @@ The ignored test requires a Vulkan adapter; Mesa lavapipe works in CI.
 1. Validate both native examples on screen and the web demo in browsers.
    Check colors, transparency, fonts and pointer coordinates at different
    scale factors.
-2. Add focused keyboard/IME routing and clipboard support to generic panes.
+2. Extend keyboard coverage and IME composition support; standard text
+   clipboard and focused editing input are implemented.
 3. Decide how generic Iced overlays should behave beyond pane boundaries;
    currently they are clipped to the pane texture.
 4. Extend chart functionality: built-in legends, nonlinear axes and more

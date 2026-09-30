@@ -212,13 +212,12 @@ impl IcedPlotPane {
             if response.double_clicked() {
                 self.reset();
             } else {
-                if response.drag_started_by(egui::PointerButton::Primary) {
-                    if let Some(start) = ui
+                if response.drag_started_by(egui::PointerButton::Primary)
+                    && let Some(start) = ui
                         .input(|i| i.pointer.press_origin())
                         .filter(|p| area.contains(*p))
-                    {
-                        self.drag = Some((start, bounds, ui.input(|i| i.modifiers.shift)));
-                    }
+                {
+                    self.drag = Some((start, bounds, ui.input(|i| i.modifiers.shift)));
                 }
                 if let (Some((start, original, boxed)), Some(p)) = (self.drag, pointer) {
                     if boxed {
@@ -246,38 +245,37 @@ impl IcedPlotPane {
                 if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
                     self.drag = None;
                 }
-                if response.hovered() && self.drag.is_none() {
-                    if let Some(p) = pointer.filter(|p| area.contains(*p)) {
-                        let (scroll, pinch) =
-                            ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
-                        let factor =
-                            ((-scroll as f64 * 0.002).exp() / pinch as f64).clamp(0.1, 10.0);
-                        if factor != 1.0 {
-                            self.bounds = Some(bounds.zoom(bounds.point(area, p), factor));
-                            ui.input_mut(|i| {
-                                i.smooth_scroll_delta = egui::Vec2::ZERO;
-                            });
-                        }
+                if response.hovered()
+                    && self.drag.is_none()
+                    && let Some(p) = pointer.filter(|p| area.contains(*p))
+                {
+                    let (scroll, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+                    let factor = ((-scroll as f64 * 0.002).exp() / pinch as f64).clamp(0.1, 10.0);
+                    if factor != 1.0 {
+                        self.bounds = Some(bounds.zoom(bounds.point(area, p), factor));
+                        ui.input_mut(|i| {
+                            i.smooth_scroll_delta = egui::Vec2::ZERO;
+                        });
                     }
                 }
             }
-            if response.hovered() {
-                if let Some(p) = pointer.filter(|p| area.contains(*p)) {
-                    let painter = ui.painter().with_clip_rect(area);
-                    let stroke = egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color());
-                    painter.line_segment(
-                        [egui::pos2(p.x, area.top()), egui::pos2(p.x, area.bottom())],
-                        stroke,
-                    );
-                    painter.line_segment(
-                        [egui::pos2(area.left(), p.y), egui::pos2(area.right(), p.y)],
-                        stroke,
-                    );
-                    if let Some(text) = source.hover(bounds.point(area, p)) {
-                        response.clone().on_hover_ui_at_pointer(|ui| {
-                            ui.label(text);
-                        });
-                    }
+            if response.hovered()
+                && let Some(p) = pointer.filter(|p| area.contains(*p))
+            {
+                let painter = ui.painter().with_clip_rect(area);
+                let stroke = egui::Stroke::new(1.0_f32, ui.visuals().weak_text_color());
+                painter.line_segment(
+                    [egui::pos2(p.x, area.top()), egui::pos2(p.x, area.bottom())],
+                    stroke,
+                );
+                painter.line_segment(
+                    [egui::pos2(area.left(), p.y), egui::pos2(area.right(), p.y)],
+                    stroke,
+                );
+                if let Some(text) = source.hover(bounds.point(area, p)) {
+                    response.clone().on_hover_ui_at_pointer(|ui| {
+                        ui.label(text);
+                    });
                 }
             }
         }

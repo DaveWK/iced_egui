@@ -6,11 +6,12 @@
 use std::rc::Rc;
 
 use iced_egui::{IcedElement, IcedHost, IcedPane};
-use iced_widget::{button, checkbox, column, container, slider, text};
+use iced_widget::{button, checkbox, column, container, slider, text, text_input};
 
 #[derive(Clone, Debug)]
 enum Msg {
     Bump,
+    Edit(String),
     Slide(f32),
     Toggle(bool),
 }
@@ -20,6 +21,8 @@ struct App {
     clicks: u32,
     level: f32,
     enabled: bool,
+    iced_text: String,
+    egui_text: String,
 }
 
 impl App {
@@ -34,6 +37,8 @@ impl App {
             clicks: 0,
             level: 0.5,
             enabled: true,
+            iced_text: "Copy or cut this Iced text".into(),
+            egui_text: "Paste between egui and Iced".into(),
         }
     }
 }
@@ -42,6 +47,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("egui").show(ctx, |ui| {
             ui.heading("egui side");
+            ui.text_edit_singleline(&mut self.egui_text);
             ui.label(format!("clicks: {}", self.clicks));
             ui.add(egui::Slider::new(&mut self.level, 0.0..=1.0).text("level (egui)"));
             ui.checkbox(&mut self.enabled, "enabled (egui)");
@@ -50,7 +56,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Iced side");
             let (clicks, level, enabled) = (self.clicks, self.level, self.enabled);
-            let view = move || -> IcedElement<'static, Msg> {
+            let iced_text = self.iced_text.clone();
+            let view = || -> IcedElement<'_, Msg> {
                 let mut bump = button("bump");
                 if enabled {
                     bump = bump.on_press(Msg::Bump);
@@ -58,6 +65,7 @@ impl eframe::App for App {
                 container(
                     column![
                         text(format!("clicks: {clicks}")),
+                        text_input("Clipboard-enabled Iced input", &iced_text).on_input(Msg::Edit),
                         bump,
                         slider(0.0..=1.0, level, Msg::Slide).step(0.01_f32),
                         checkbox(enabled)
@@ -72,6 +80,7 @@ impl eframe::App for App {
             let out = self.pane.show(ui, view);
             for msg in out.messages {
                 match msg {
+                    Msg::Edit(value) => self.iced_text = value,
                     Msg::Bump => self.clicks += 1,
                     Msg::Slide(v) => self.level = v,
                     Msg::Toggle(v) => self.enabled = v,

@@ -80,6 +80,15 @@
 //! frame is submitted afterwards, and queue submissions execute in order, so
 //! the texture is complete before egui samples it.
 //!
+//! # Clipboard
+//!
+//! A clicked pane owns editing focus. Copy/cut use egui platform output;
+//! paste reads the payload supplied by egui's Paste event. Clipboard input
+//! is consumed only by the focused pane. Standard text clipboard is
+//! supported; primary selection and arbitrary synchronous OS reads are not.
+//! Basic editing keys are routed as well; IME composition and full keyboard
+//! coverage remain unsupported.
+//!
 //! # Redraw cost
 //!
 //! By default the Iced interface is rebuilt and presented on every egui
@@ -93,13 +102,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod clipboard;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use iced_core::mouse::{self, ScrollDelta};
-use iced_core::{Color, Element, Event, Point, Size, Theme, clipboard, renderer};
+use iced_core::{Color, Element, Event, Point, Size, Theme, renderer};
 use iced_graphics::{Antialiasing, Shell, Viewport};
 use iced_runtime::user_interface::{self, UserInterface};
 
@@ -226,6 +237,7 @@ pub struct IcedPane<Message> {
     redraw_on_demand: bool,
     redraw_requested: bool,
     hovered_last_frame: bool,
+    focused_last_frame: bool,
     last_cursor: Option<Point>,
     last_geometry: Option<([u32; 2], f32, egui::Vec2)>,
     _marker: std::marker::PhantomData<Message>,
@@ -243,6 +255,7 @@ impl<Message> IcedPane<Message> {
             redraw_on_demand: false,
             redraw_requested: true,
             hovered_last_frame: false,
+            focused_last_frame: false,
             last_cursor: None,
             last_geometry: None,
             _marker: std::marker::PhantomData,
@@ -325,7 +338,18 @@ impl<Message> IcedPane<Message> {
             (Vec::new(), mouse::Cursor::Unavailable)
         };
 
+        if forward_input && response.contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
+            response.request_focus();
+        }
+        let focused = forward_input && response.has_focus();
+        let lost_focus = self.focused_last_frame && !focused;
+        self.focused_last_frame = focused;
+        let mut events: Vec<clipboard::RoutedEvent> = events.into_iter().map(Into::into).collect();
+        events.extend(clipboard::take_events(ui.ctx(), focused));
+        let mut clipboard = clipboard::EguiClipboard::new(ui.ctx());
+
         let must_redraw = self.redraw_requested
+            || lost_focus
             || !self.redraw_on_demand
             || !events.is_empty()
             || self.last_geometry != Some((px, ppp, rect.size()));
@@ -341,16 +365,25 @@ impl<Message> IcedPane<Message> {
             let cache = self.cache.take().unwrap_or_default();
             let mut interface = UserInterface::build(view(), bounds, cache, &mut *renderer);
 
-            let (state, _statuses) = interface.update(
-                &events,
-                cursor,
-                &mut *renderer,
-                &mut clipboard::Null,
-                &mut messages,
-            );
-            if let user_interface::State::Outdated = state {
-                let cache = interface.into_cache();
-                interface = UserInterface::build(view(), bounds, cache, &mut *renderer);
+            if lost_focus {
+                interface.operate(
+                    &*renderer,
+                    &mut iced_core::widget::operation::focusable::unfocus::<()>(),
+                );
+            }
+            for event in events {
+                clipboard.begin_event(event.paste);
+                let (state, _) = interface.update(
+                    std::slice::from_ref(&event.event),
+                    cursor,
+                    &mut *renderer,
+                    &mut clipboard,
+                    &mut messages,
+                );
+                if let user_interface::State::Outdated = state {
+                    let cache = interface.into_cache();
+                    interface = UserInterface::build(view(), bounds, cache, &mut *renderer);
+                }
             }
 
             let style = renderer::Style {

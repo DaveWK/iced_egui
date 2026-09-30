@@ -185,10 +185,35 @@ heavy content, keep tessellation out of the per-frame path with Iced's own
 or call `set_redraw_on_demand(true)` and `request_redraw()` to present only
 when you say so. Input events always force a redraw.
 
+## Clipboard and text editing
+
+Click an Iced pane to give it keyboard focus. Copy and cut use egui's
+platform clipboard output; paste consumes the text from egui's `Paste`
+event. The same bridge works with native and web eframe backends without
+another OS clipboard dependency. Run the `widgets` example to copy/paste
+between its Iced and egui text inputs.
+
+Select-all, text entry, arrows, Home/End, Backspace/Delete, Enter and Escape
+are routed to the focused pane. Clipboard events are consumed once, so
+other panes and egui editors do not also process the same paste.
+Each paste carries its own payload, including Unicode and empty strings;
+the bridge never substitutes stale contents from an earlier paste.
+
+Clipboard reads are event-scoped: Iced can read text delivered in the current
+paste event, but this is not a synchronous system-clipboard query API.
+Browser access uses the eframe clipboard integration and its secure-context
+requirements. X11/Wayland primary selection is not supported: primary reads
+return None and writes do not modify the standard clipboard.
+
+Tests cover adapter output, event ordering, focus ownership and shortcut
+deduplication, plus a Vulkan-backed Iced text-input copy/cut/paste test.
+The integration test inspects egui platform output rather than modifying the
+developer's system clipboard.
+
 ## Not yet
 
-- Keyboard and IME events are not forwarded (mouse only).
-- Iced's clipboard is `clipboard::Null`.
+- IME composition, full keyboard mapping and Iced Tab-focus traversal are not implemented.
+- Primary-selection/middle-click clipboard support is not implemented.
 - Iced overlays (pick-list menus, tooltips) draw inside the pane's texture
   and are clipped to it; they cannot float over surrounding egui.
 
