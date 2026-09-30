@@ -1,8 +1,10 @@
 [package]
+# This experimental branch requires application-root Git patches.
+publish = false
 name = "iced_egui"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 description = "Render Iced widget trees inside egui, on egui's own wgpu device, via egui-wgpu"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/DaveWK/iced_egui"
@@ -23,14 +25,14 @@ webgl = ["iced_renderer/webgl", "wgpu/webgl"]
 fira-sans = ["iced_renderer/fira-sans"]
 
 [dependencies]
-egui = "0.33"
+egui = "0.36.2"
 # No default features: egui-wgpu's defaults enable wgpu's
 # `fragile-send-sync-non-atomic-wasm`, which makes wgpu demand `Send + Sync`
 # window handles on wasm32, and iced_wgpu's compositor deliberately does not
 # provide them there. Downstream web builds must keep that feature off too
-# (eframe: `default-features = false, features = ["wgpu"]`).
-egui-wgpu = { version = "0.33", default-features = false }
-wgpu = "27"
+# (eframe: `default-features = false, features = ["wgpu_no_default_features"]`).
+egui-wgpu = { version = "0.36.2", default-features = false }
+wgpu = "30"
 iced_core = "0.14"
 iced_graphics = { version = "0.14", features = ["geometry"] }
 iced_runtime = "0.14"
@@ -45,11 +47,11 @@ plotters-iced2 = { version = "0.14", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
-eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu_no_default_features", "default_fonts", "x11", "wayland"] }
 plotters = { version = "0.3", default-features = false, features = ["line_series", "area_series"] }
 plotters-iced2 = "0.14"
 env_logger = "0.11"
-egui_tiles = "0.14"
+egui_tiles = "0.17.1"
 
 [[example]]
 name = "plotters"
@@ -61,3 +63,7 @@ required-features = ["fira-sans"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.6", optional = true, default-features = false, features = ["wayland-data-control"] }
+
+[patch.crates-io]
+iced_wgpu = { git = "https://github.com/DaveWK/iced-wgpu-nastyfork", rev = "1f0b97b4e8c47ed64a6e66007672c9dbfd1baf61" }
+cryoglyph = { git = "https://github.com/DaveWK/cryoglyph-nastyfork", rev = "078fab8b8425c5da41465d4aca7fb78c5af3b7fe" }

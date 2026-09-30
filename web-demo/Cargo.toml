@@ -9,11 +9,15 @@ publish = false
 
 [dependencies]
 iced_egui = { path = "..", features = ["fira-sans", "webgl"] }
-# default-features = false is load-bearing: eframe's defaults enable wgpu's
-# fragile-send-sync-non-atomic-wasm, under which iced_wgpu does not compile.
-eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts"] }
-egui = "0.33"
+# Use wgpu_no_default_features: eframe's wgpu feature enables
+# fragile-send-sync-non-atomic-wasm, incompatible with Iced's window bounds.
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu_no_default_features", "default_fonts"] }
+egui = "0.36.2"
 iced_widget = "0.14"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement"] }
+
+[patch.crates-io]
+iced_wgpu = { git = "https://github.com/DaveWK/iced-wgpu-nastyfork", rev = "1f0b97b4e8c47ed64a6e66007672c9dbfd1baf61" }
+cryoglyph = { git = "https://github.com/DaveWK/cryoglyph-nastyfork", rev = "078fab8b8425c5da41465d4aca7fb78c5af3b7fe" }

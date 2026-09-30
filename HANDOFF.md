@@ -1,5 +1,13 @@
 # Contributor handoff
 
+## Experimental wgpu 30 branch
+
+`feat/nastyfork-wgpu30` upgrades egui/eframe to 0.36.2 and egui_tiles to 0.17.1
+using pinned `iced-wgpu-nastyfork` and `cryoglyph-nastyfork` dependencies.
+See [docs/NASTYFORK.md](docs/NASTYFORK.md) for the current dependency patches,
+validation record, and open gates. Earlier verification notes below describe
+the original egui 0.33 branch unless repeated in that document.
+
 ## Architecture
 
 `IcedHost` runs a headless Iced wgpu renderer on egui's own device and

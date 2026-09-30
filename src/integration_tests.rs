@@ -39,9 +39,9 @@ struct App {
 }
 impl App {
     fn new() -> Self {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) =
@@ -49,6 +49,8 @@ impl App {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let renderer = egui_wgpu::Renderer::new(&device, format, Default::default());
         let host = Rc::new(IcedHost::new(&egui_wgpu::RenderState {
+            instance,
+            surface_config: egui_wgpu::SurfaceConfig::LOW_LATENCY,
             adapter,
             available_adapters: vec![],
             device,
@@ -82,7 +84,8 @@ impl App {
         let first = self.first.clone();
         let second = self.second.clone();
         let selected = self.selected;
-        self.ctx.run(
+        crate::run_test_ui(
+            &self.ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -203,7 +206,10 @@ impl App {
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
         rx.recv().unwrap().unwrap();
-        let data = buffer.slice(..).get_mapped_range();
+        let data = buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("readback mapped");
         let pixel = data[..4].try_into().unwrap();
         drop(data);
         buffer.unmap();
@@ -252,15 +258,18 @@ fn ime_tab_cursor_and_primary_selection() {
     assert!(app.rect.contains(ime.cursor_rect.center()));
     app.frame(vec![key(egui::Key::A, egui::Modifiers::COMMAND)]);
     assert_eq!(&*app.selection.borrow(), "alpha");
-    let output = app.frame(vec![
-        egui::Event::Ime(egui::ImeEvent::Enabled),
-        egui::Event::Ime(egui::ImeEvent::Preedit("にほん".into())),
-    ]);
+    let output = app.frame(vec![egui::Event::Ime(egui::ImeEvent::Preedit {
+        text: "にほん".into(),
+        active_range_chars: None,
+    })]);
     assert_eq!(app.first, "alpha");
     assert!(output.platform_output.ime.is_some());
     app.frame(vec![
         egui::Event::Ime(egui::ImeEvent::Commit("日本🦀".into())),
-        egui::Event::Ime(egui::ImeEvent::Disabled),
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: String::new(),
+            active_range_chars: None,
+        }),
     ]);
     assert_eq!(app.first, "日本🦀");
     app.frame(vec![tab(false)]);
