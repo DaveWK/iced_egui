@@ -8,12 +8,18 @@ use iced_core::{
 pub(crate) struct EguiClipboard {
     ctx: egui::Context,
     standard: Option<String>,
+    pub primary: crate::primary::SharedPrimary,
+    pub selection_only: bool,
+    pub captured_selection: Option<String>,
 }
 impl EguiClipboard {
     pub(crate) fn new(ctx: &egui::Context) -> Self {
         Self {
             ctx: ctx.clone(),
             standard: None,
+            primary: Default::default(),
+            selection_only: false,
+            captured_selection: None,
         }
     }
     pub(crate) fn begin_event(&mut self, paste: Option<String>) {
@@ -25,15 +31,18 @@ impl Clipboard for EguiClipboard {
     fn read(&self, kind: Kind) -> Option<String> {
         match kind {
             Kind::Standard => self.standard.clone(),
-            Kind::Primary => None,
+            Kind::Primary => self.primary.borrow_mut().read(),
         }
     }
     fn write(&mut self, kind: Kind, contents: String) {
-        if kind == Kind::Standard {
+        if self.selection_only {
+            self.captured_selection = Some(contents);
+        } else if kind == Kind::Primary {
+            self.primary.borrow_mut().write(contents);
+        } else {
             self.standard = Some(contents.clone());
             self.ctx.copy_text(contents);
         }
-        // egui has no primary-selection API; do not overwrite Standard.
     }
 }
 
@@ -103,14 +112,73 @@ fn key(k: egui::Key) -> Option<keyboard::Key> {
         egui::Key::Delete => Named::Delete,
         egui::Key::Enter => Named::Enter,
         egui::Key::Escape => Named::Escape,
+        egui::Key::Tab => Named::Tab,
+        egui::Key::Space => Named::Space,
+        egui::Key::Insert => Named::Insert,
+        egui::Key::PageUp => Named::PageUp,
+        egui::Key::PageDown => Named::PageDown,
+        egui::Key::F1 => Named::F1,
+        egui::Key::F2 => Named::F2,
+        egui::Key::F3 => Named::F3,
+        egui::Key::F4 => Named::F4,
+        egui::Key::F5 => Named::F5,
+        egui::Key::F6 => Named::F6,
+        egui::Key::F7 => Named::F7,
+        egui::Key::F8 => Named::F8,
+        egui::Key::F9 => Named::F9,
+        egui::Key::F10 => Named::F10,
+        egui::Key::F11 => Named::F11,
+        egui::Key::F12 => Named::F12,
+        egui::Key::F13 => Named::F13,
+        egui::Key::F14 => Named::F14,
+        egui::Key::F15 => Named::F15,
+        egui::Key::F16 => Named::F16,
+        egui::Key::F17 => Named::F17,
+        egui::Key::F18 => Named::F18,
+        egui::Key::F19 => Named::F19,
+        egui::Key::F20 => Named::F20,
+        egui::Key::F21 => Named::F21,
+        egui::Key::F22 => Named::F22,
+        egui::Key::F23 => Named::F23,
+        egui::Key::F24 => Named::F24,
+        egui::Key::F25 => Named::F25,
+        egui::Key::F26 => Named::F26,
+        egui::Key::F27 => Named::F27,
+        egui::Key::F28 => Named::F28,
+        egui::Key::F29 => Named::F29,
+        egui::Key::F30 => Named::F30,
+        egui::Key::F31 => Named::F31,
+        egui::Key::F32 => Named::F32,
+        egui::Key::F33 => Named::F33,
+        egui::Key::F34 => Named::F34,
+        egui::Key::F35 => Named::F35,
+        egui::Key::BrowserBack => Named::BrowserBack,
+        egui::Key::Copy => Named::Copy,
+        egui::Key::Cut => Named::Cut,
+        egui::Key::Paste => Named::Paste,
         egui::Key::A => return Some(keyboard::Key::Character("a".into())),
-        _ => return None,
+        _ => {
+            let name = match k {
+                egui::Key::Minus => "-",
+                egui::Key::Quote => "'",
+                _ => k.symbol_or_name(),
+            };
+            if name.len() == 1 {
+                return Some(keyboard::Key::Character(name.to_lowercase().into()));
+            }
+            return None;
+        }
     };
     Some(keyboard::Key::Named(named))
 }
 fn handled(e: &egui::Event) -> bool {
     match e {
-        egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) | egui::Event::Text(_) => true,
+        egui::Event::Copy
+        | egui::Event::Cut
+        | egui::Event::Paste(_)
+        | egui::Event::Text(_)
+        | egui::Event::Ime(_)
+        | egui::Event::WindowFocused(_) => true,
         egui::Event::Key {
             key: k,
             modifiers: m,
@@ -142,7 +210,7 @@ pub(crate) fn take_events(ctx: &egui::Context, focused: bool) -> Vec<RoutedEvent
     });
     translate(events, current)
 }
-fn translate(events: Vec<egui::Event>, current: egui::Modifiers) -> Vec<RoutedEvent> {
+pub(crate) fn translate(events: Vec<egui::Event>, current: egui::Modifiers) -> Vec<RoutedEvent> {
     let mut out = Vec::new();
     for e in events {
         match e {
@@ -164,6 +232,26 @@ fn translate(events: Vec<egui::Event>, current: egui::Modifiers) -> Vec<RoutedEv
                 out.push(key_event(k, m, None, false, false).into());
                 out.push(
                     Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers(current))).into(),
+                );
+            }
+            egui::Event::WindowFocused(focused) => out.push(
+                Event::Window(if focused {
+                    iced_core::window::Event::Focused
+                } else {
+                    iced_core::window::Event::Unfocused
+                })
+                .into(),
+            ),
+            egui::Event::Ime(event) => {
+                use iced_core::input_method::Event as Ime;
+                out.push(
+                    Event::InputMethod(match event {
+                        egui::ImeEvent::Enabled => Ime::Opened,
+                        egui::ImeEvent::Preedit(text) => Ime::Preedit(text, None),
+                        egui::ImeEvent::Commit(text) => Ime::Commit(text),
+                        egui::ImeEvent::Disabled => Ime::Closed,
+                    })
+                    .into(),
                 );
             }
             egui::Event::Text(text) => {
@@ -212,6 +300,60 @@ fn translate(events: Vec<egui::Event>, current: egui::Modifiers) -> Vec<RoutedEv
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn maps_all_egui_keys_and_ime_without_text_duplication() {
+        for k in egui::Key::ALL {
+            assert!(key(*k).is_some(), "missing {k:?}");
+        }
+        let events = translate(
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Enabled),
+                egui::Event::Ime(egui::ImeEvent::Preedit("かな".into())),
+                egui::Event::Ime(egui::ImeEvent::Commit("仮名".into())),
+                egui::Event::Ime(egui::ImeEvent::Disabled),
+            ],
+            Default::default(),
+        );
+        assert_eq!(events.len(), 4);
+        assert!(
+            matches!(&events[2].event,Event::InputMethod(iced_core::input_method::Event::Commit(s)) if s=="仮名")
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e.event, Event::Keyboard(_)))
+        );
+    }
+    #[test]
+    fn primary_failures_do_not_fall_back_to_standard() {
+        struct Broken;
+        impl crate::PrimarySelection for Broken {
+            fn read(&mut self) -> Result<Option<String>, String> {
+                Err("read failed".into())
+            }
+            fn write(&mut self, _: String) -> Result<(), String> {
+                Err("write failed".into())
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut cb = EguiClipboard::new(&ctx);
+        cb.primary.borrow_mut().provider = Some(Box::new(Broken));
+        cb.begin_event(Some("standard".into()));
+        assert_eq!(cb.read(Kind::Primary), None);
+        assert_eq!(
+            cb.primary.borrow_mut().error.take().as_deref(),
+            Some("read failed")
+        );
+        let output = ctx.run(Default::default(), |_| {
+            cb.write(Kind::Primary, "selection".into())
+        });
+        assert!(output.platform_output.commands.is_empty());
+        assert_eq!(cb.read(Kind::Standard).as_deref(), Some("standard"));
+        assert_eq!(
+            cb.primary.borrow_mut().error.take().as_deref(),
+            Some("write failed")
+        );
+    }
     #[test]
     fn clipboard_write_uses_platform_output_and_keeps_primary_separate() {
         let ctx = egui::Context::default();

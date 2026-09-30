@@ -41,9 +41,41 @@ multiple pastes per frame. Focus loss clears Iced widget focus.
 
 The widgets example includes both Iced and egui text editors. Tests exercise
 Unicode, empty/multiple pastes, copy/cut, shortcut deduplication, and focus
-transfer to an egui editor. Primary selection and synchronous OS clipboard
-reads are unsupported. Browser/native OS clipboard delivery has not been
+transfer to an egui editor. Standard synchronous OS clipboard reads remain
+unsupported. Browser/native OS clipboard delivery has not been
 manually validated; integration tests assert the platform output boundary.
+
+## Keyboard, primary selection and overlays
+
+`input.rs` implements focusable-widget traversal and cursor conversion.
+`clipboard.rs` routes every egui logical key and IME lifecycle event, preserving
+semantic clipboard events. `IcedPane` handles Tab/Shift+Tab boundaries before
+egui allocates the pane on the next frame, preserving egui's focus ordering.
+Iced redraw deadlines and IME candidate rectangles feed egui platform output;
+preedit text is a separate egui overlay until committed.
+
+`PrimarySelection` is an injectable provider shared by the host. The optional
+Linux `primary-selection` feature adds arboard with Wayland data-control support.
+Initialization and later access errors are surfaced. Selection capture uses
+Iced's copy handling without emitting standard clipboard output; middle-click
+reads PRIMARY, positions the caret, and pastes it. Password selection is tested
+not to replace PRIMARY. Tests inject a provider, not the desktop clipboard.
+
+`overlay.rs` constrains the root widget to its pane but gives overlays viewport
+bounds. It gates base and overlay draw passes into separate textures. Foreground
+egui areas route popup input; nested overlays use the same pass. Tooltip areas
+are passive, inferred from the overlay's center-point mouse interaction. Outside
+clicks dismiss menus and remain available to surrounding egui. Escape uses the
+standard menu's outside-click dismissal path. Custom overlays should report their
+mouse interaction accurately. A visible overlay allocates a viewport-sized
+texture; `IcedPlotPane` keeps its cached rendering path.
+
+The Vulkan tests cover actual text-input composition, candidate coordinates,
+cursors, Tab/Shift+Tab within/across panes and egui, middle-click PRIMARY,
+password privacy, popup pixels outside a pane, selection and dismissal, and
+passive tooltip cleanup. Unit tests cover all egui logical keys and clipboard
+errors. Native OS IME/selection delivery and browser interaction still need
+manual validation.
 
 ## Compatibility constraints
 
@@ -62,12 +94,12 @@ manually validated; integration tests assert the platform output boundary.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --all-targets --features fira-sans,plotters -- -D warnings
+cargo clippy --all-targets --features fira-sans,plotters,primary-selection -- -D warnings
 cargo check --no-default-features
-cargo test --features fira-sans,plotters
-cargo test --features fira-sans,plotters --lib -- --ignored --nocapture
+cargo test --features fira-sans,plotters,primary-selection
+cargo test --features fira-sans,plotters,primary-selection --lib -- --ignored --nocapture
 cargo check --target wasm32-unknown-unknown --features fira-sans,plotters,webgl
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features fira-sans,plotters
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --features fira-sans,plotters,primary-selection
 ```
 
 The ignored test requires a Vulkan adapter; Mesa lavapipe works in CI.
@@ -77,10 +109,9 @@ The ignored test requires a Vulkan adapter; Mesa lavapipe works in CI.
 1. Validate both native examples on screen and the web demo in browsers.
    Check colors, transparency, fonts and pointer coordinates at different
    scale factors.
-2. Extend keyboard coverage and IME composition support; standard text
-   clipboard and focused editing input are implemented.
-3. Decide how generic Iced overlays should behave beyond pane boundaries;
-   currently they are clipped to the pane texture.
+2. Validate native IME candidate windows and primary-selection protocol support
+   on X11 and the intended Wayland compositors.
+3. Measure overlay texture cost and test additional custom/nested overlays.
 4. Extend chart functionality: built-in legends, nonlinear axes and more
    examples such as candlesticks and heatmaps.
 5. Benchmark rendering and cached frames before making performance claims.

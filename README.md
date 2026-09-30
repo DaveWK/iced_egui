@@ -193,29 +193,69 @@ event. The same bridge works with native and web eframe backends without
 another OS clipboard dependency. Run the `widgets` example to copy/paste
 between its Iced and egui text inputs.
 
-Select-all, text entry, arrows, Home/End, Backspace/Delete, Enter and Escape
-are routed to the focused pane. Clipboard events are consumed once, so
-other panes and egui editors do not also process the same paste.
-Each paste carries its own payload, including Unicode and empty strings;
-the bridge never substitutes stale contents from an earlier paste.
+All egui logical keys, text input, IME events and modifiers are routed to
+the focused pane. Tab and Shift+Tab traverse Iced widgets that implement the
+focusable operation, then move to the neighboring egui widget or Iced pane.
+Pointer cursors and Iced redraw deadlines are forwarded to egui. IME candidate
+positioning uses the focused field's screen rectangle; preedit text appears
+above the interface without entering the field until committed.
 
-Clipboard reads are event-scoped: Iced can read text delivered in the current
-paste event, but this is not a synchronous system-clipboard query API.
-Browser access uses the eframe clipboard integration and its secure-context
-requirements. X11/Wayland primary selection is not supported: primary reads
-return None and writes do not modify the standard clipboard.
+Clipboard events are consumed once. Each paste carries its own payload,
+including Unicode and empty strings; the bridge never substitutes an earlier
+paste. Standard clipboard reads remain event-scoped, not arbitrary synchronous
+OS queries. Browser clipboard delivery uses eframe's platform integration.
 
-Tests cover adapter output, event ordering, focus ownership and shortcut
-deduplication, plus a Vulkan-backed Iced text-input copy/cut/paste test.
-The integration test inspects egui platform output rather than modifying the
-developer's system clipboard.
+### Linux primary selection
 
-## Not yet
+Enable the optional `primary-selection` feature and initialize the shared host:
 
-- IME composition, full keyboard mapping and Iced Tab-focus traversal are not implemented.
-- Primary-selection/middle-click clipboard support is not implemented.
-- Iced overlays (pick-list menus, tooltips) draw inside the pane's texture
-  and are clipped to it; they cannot float over surrounding egui.
+```rust,ignore
+let host = Rc::new(IcedHost::new(render_state));
+host.enable_primary_selection()?;
+```
+
+This uses arboard's X11/Wayland backend. Wayland requires a supported compositor
+data-control protocol. Text selection claims PRIMARY; middle-click positions
+the caret and pastes PRIMARY. It never replaces the standard clipboard.
+Secure Iced text inputs do not export their selection. Changed selections are
+copied through Iced's copy handling into a capture-only clipboard; custom
+widgets therefore need to support that handling to export selected text.
+
+Applications can instead install their own `PrimarySelection` implementation
+with `host.set_primary_selection(provider)`. Backend initialization returns an
+error on failure; later read/write errors are available from
+`host.take_primary_selection_error()`. Unavailable selections do not fall back
+to the standard clipboard.
+
+Try `cargo run --example widgets --features fira-sans,primary-selection` on Linux.
+The example includes two Iced inputs, an egui editor, a pick list and a tooltip.
+
+### Iced overlays
+
+Pick-list menus, tooltips and nested overlays lay out against the egui viewport,
+so they can extend beyond a panel or `egui_tiles` pane. The base widget tree
+remains clipped to its pane. An extra transparent GPU texture is allocated only
+while an overlay is visible and composited on egui's foreground layer. Chart
+panes retain their existing cached rendering path.
+
+Interactive overlays receive pointer input through an egui area covering their
+bounds; passive tooltips do not intercept input. Interactivity is inferred from
+the overlay's mouse interaction at its center. Custom overlays should return an
+appropriate interaction there. Escape dismisses standard Iced menus using their
+outside-click handling; outside clicks also dismiss them. Outside clicks remain
+available to surrounding egui widgets. Popups stay inside the current viewport;
+this is not a separate OS window or a global modal dialog.
+
+Tests exercise real widgets on Vulkan, including IME preedit/commit, focus across
+panes and egui, primary-selection isolation and failures, password privacy,
+popup selection/dismissal, tooltip exit, and pixel readback beyond the pane.
+Clipboard tests use an injected provider and inspect egui platform output; they
+do not touch the developer's system clipboard.
+
+Native compositor/IME delivery and browser visual checks remain outstanding.
+The bridge cannot expose input metadata absent from egui's events, such as IME
+selection ranges or Iced physical key codes. A visible overlay currently uses
+a viewport-sized texture; benchmark this cost before making performance claims.
 
 ## License
 

@@ -13,6 +13,8 @@ exclude = ["/.github", "/web-demo"]
 
 [features]
 default = []
+## Native X11 / Wayland primary-selection clipboard (Linux only).
+primary-selection = ["dep:arboard"]
 plotters = ["dep:plotters", "dep:plotters-iced2"]
 ## wgpu's WebGL2 fallback for browsers without WebGPU (forwards to iced and wgpu).
 webgl = ["iced_renderer/webgl", "wgpu/webgl"]
@@ -56,3 +58,6 @@ required-features = ["fira-sans", "plotters"]
 [[example]]
 name = "widgets"
 required-features = ["fira-sans"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6", optional = true, default-features = false, features = ["wayland-data-control"] }

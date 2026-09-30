@@ -85,9 +85,12 @@
 //! A clicked pane owns editing focus. Copy/cut use egui platform output;
 //! paste reads the payload supplied by egui's Paste event. Clipboard input
 //! is consumed only by the focused pane. Standard text clipboard is
-//! supported; primary selection and arbitrary synchronous OS reads are not.
-//! Basic editing keys are routed as well; IME composition and full keyboard
-//! coverage remain unsupported.
+//! supported. All egui logical keys and IME composition events are routed to
+//! the focused pane, with Tab traversal, candidate positioning and cursor feedback.
+//! Install a [`PrimarySelection`] provider for middle-click paste, or enable the
+//! optional Linux `primary-selection` feature. Standard clipboard reads remain
+//! event-scoped. Iced overlays use a separate viewport-sized texture while visible
+//! so menus and tooltips can extend beyond the pane.
 //!
 //! # Redraw cost
 //!
@@ -103,6 +106,10 @@
 #![warn(missing_docs)]
 
 mod clipboard;
+mod input;
+mod overlay;
+mod primary;
+pub use primary::PrimarySelection;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -147,6 +154,7 @@ pub struct IcedHost {
     format: wgpu::TextureFormat,
     egui_renderer: Arc<egui::mutex::RwLock<egui_wgpu::Renderer>>,
     renderer: RefCell<Renderer>,
+    primary: primary::SharedPrimary,
 }
 
 impl IcedHost {
@@ -179,7 +187,29 @@ impl IcedHost {
             format,
             egui_renderer: render_state.renderer.clone(),
             renderer: RefCell::new(renderer),
+            primary: Default::default(),
         }
+    }
+
+    /// Install a primary-selection provider shared by all panes on this host.
+    pub fn set_primary_selection(&self, provider: impl PrimarySelection + 'static) {
+        self.primary.borrow_mut().provider = Some(Box::new(provider));
+    }
+
+    /// Take the last primary-selection read/write error, if any.
+    pub fn take_primary_selection_error(&self) -> Option<String> {
+        self.primary.borrow_mut().error.take()
+    }
+
+    /// Enable native X11 or Wayland primary selection.
+    ///
+    /// Requires the `primary-selection` feature on Linux. Wayland support
+    /// depends on the compositor exposing a supported data-control protocol.
+    #[cfg(all(feature = "primary-selection", target_os = "linux"))]
+    pub fn enable_primary_selection(&self) -> Result<(), String> {
+        let clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+        self.set_primary_selection(primary::Native(clipboard));
+        Ok(())
     }
 
     /// Register a font with Iced's text system, e.g. the same TTF you gave egui.
@@ -232,12 +262,22 @@ pub struct IcedPane<Message> {
     host: Rc<IcedHost>,
     cache: Option<user_interface::Cache>,
     surface: Option<Surface>,
+    overlay_surface: Option<Surface>,
+    overlay_bounds: Option<egui::Rect>,
+    overlay_interactive: bool,
+    input_method: iced_core::InputMethod,
+    mouse_interaction: mouse::Interaction,
     theme: Theme,
     clear_color: Option<Color>,
     redraw_on_demand: bool,
     redraw_requested: bool,
+    scheduled_redraw: Option<iced_core::time::Instant>,
     hovered_last_frame: bool,
     focused_last_frame: bool,
+    window_focused: bool,
+    pending_focus: Option<egui::FocusDirection>,
+    tab_backwards: bool,
+    last_selection: Option<String>,
     last_cursor: Option<Point>,
     last_geometry: Option<([u32; 2], f32, egui::Vec2)>,
     _marker: std::marker::PhantomData<Message>,
@@ -250,12 +290,22 @@ impl<Message> IcedPane<Message> {
             host,
             cache: Some(user_interface::Cache::new()),
             surface: None,
+            overlay_surface: None,
+            overlay_bounds: None,
+            overlay_interactive: false,
+            input_method: iced_core::InputMethod::Disabled,
+            mouse_interaction: mouse::Interaction::None,
             theme: Theme::Light,
             clear_color: Some(Color::TRANSPARENT),
             redraw_on_demand: false,
             redraw_requested: true,
+            scheduled_redraw: None,
             hovered_last_frame: false,
             focused_last_frame: false,
+            window_focused: true,
+            pending_focus: None,
+            tab_backwards: false,
+            last_selection: None,
             last_cursor: None,
             last_geometry: None,
             _marker: std::marker::PhantomData,
@@ -324,7 +374,37 @@ impl<Message> IcedPane<Message> {
         forward_input: bool,
         mut view: impl FnMut() -> IcedElement<'a, Message>,
     ) -> IcedOutput<Message> {
+        if let Some(backwards) = ui.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(modifiers.shift),
+                _ => None,
+            })
+        }) {
+            self.tab_backwards = backwards;
+        }
+        if let Some(direction) = self.pending_focus.take() {
+            ui.memory_mut(|memory| memory.move_focus(direction));
+        }
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+        let screen = ui.ctx().content_rect();
+        let origin = if forward_input { screen.min } else { rect.min };
+        let overlay_response = self.overlay_bounds.map(|bounds| {
+            egui::Area::new(response.id.with("iced_overlay"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(bounds.min)
+                .movable(false)
+                .interactable(self.overlay_interactive)
+                .show(ui.ctx(), |ui| {
+                    ui.allocate_exact_size(bounds.size(), egui::Sense::click_and_drag())
+                        .1
+                })
+                .inner
+        });
         let ppp = ui.ctx().pixels_per_point();
         let px = [
             ((rect.width() * ppp).round() as u32).max(1),
@@ -333,23 +413,82 @@ impl<Message> IcedPane<Message> {
 
         // ── Input → Iced events ─────────────────────────────────────────
         let (events, cursor) = if forward_input {
-            self.collect_events(ui, &response, rect)
+            self.collect_events(
+                ui,
+                overlay_response
+                    .as_ref()
+                    .filter(|r| r.contains_pointer() || r.dragged())
+                    .unwrap_or(&response),
+                egui::Rect::from_min_size(origin, rect.size()),
+            )
         } else {
             (Vec::new(), mouse::Cursor::Unavailable)
         };
 
-        if forward_input && response.contains_pointer() && ui.input(|i| i.pointer.any_pressed()) {
+        if forward_input
+            && (response.contains_pointer()
+                || overlay_response
+                    .as_ref()
+                    .is_some_and(|r| r.contains_pointer()))
+            && ui.input(|i| i.pointer.any_pressed())
+        {
             response.request_focus();
         }
-        let focused = forward_input && response.has_focus();
+        let focused = forward_input && ui.memory(|memory| memory.has_focus(response.id));
+        let window_focused = ui.input(|i| i.focused);
+        let gained_focus = focused && !self.focused_last_frame;
         let lost_focus = self.focused_last_frame && !focused;
+        if lost_focus {
+            self.last_selection = None;
+        }
+        if focused {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                )
+            });
+        }
         self.focused_last_frame = focused;
         let mut events: Vec<clipboard::RoutedEvent> = events.into_iter().map(Into::into).collect();
-        events.extend(clipboard::take_events(ui.ctx(), focused));
+        // An open popup also needs outside clicks to dismiss itself.
+        if forward_input
+            && self.overlay_bounds.is_some()
+            && !response.contains_pointer()
+            && !overlay_response
+                .as_ref()
+                .is_some_and(|r| r.contains_pointer())
+            && ui.input(|i| i.pointer.any_pressed())
+        {
+            events.push(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)).into());
+        }
+        let keyboard_events = clipboard::take_events(ui.ctx(), focused && window_focused);
+        let select = events.iter().any(|e| match e.event {
+            Event::Mouse(
+                mouse::Event::ButtonPressed(mouse::Button::Left)
+                | mouse::Event::ButtonReleased(mouse::Button::Left),
+            ) => true,
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                ui.input(|i| i.pointer.primary_down())
+            }
+            _ => false,
+        }) || !keyboard_events.is_empty();
+        events.extend(keyboard_events);
         let mut clipboard = clipboard::EguiClipboard::new(ui.ctx());
+        clipboard.primary = self.host.primary.clone();
 
         let must_redraw = self.redraw_requested
+            || self
+                .scheduled_redraw
+                .is_some_and(|deadline| deadline <= iced_core::time::Instant::now())
             || lost_focus
+            || gained_focus
+            || (forward_input && (focused || self.overlay_bounds.is_some()))
             || !self.redraw_on_demand
             || !events.is_empty()
             || self.last_geometry != Some((px, ppp, rect.size()));
@@ -358,12 +497,30 @@ impl<Message> IcedPane<Message> {
         let mut redrawn = false;
 
         if must_redraw {
+            self.scheduled_redraw = None;
             let host = self.host.clone();
             let mut renderer = host.renderer.borrow_mut();
-            let bounds = Size::new(rect.width(), rect.height());
+            let bounds = if forward_input {
+                Size::new(screen.width(), screen.height())
+            } else {
+                Size::new(rect.width(), rect.height())
+            };
+            let pass = Rc::new(overlay::Pass::default());
+            let pane_bounds = iced_core::Rectangle::new(
+                Point::new(rect.min.x - origin.x, rect.min.y - origin.y),
+                Size::new(rect.width(), rect.height()),
+            );
+            let mut build = || {
+                if forward_input {
+                    overlay::root(view(), pane_bounds, pass.clone())
+                } else {
+                    view()
+                }
+            };
 
+            self.input_method = iced_core::InputMethod::Disabled;
             let cache = self.cache.take().unwrap_or_default();
-            let mut interface = UserInterface::build(view(), bounds, cache, &mut *renderer);
+            let mut interface = UserInterface::build(build(), bounds, cache, &mut *renderer);
 
             if lost_focus {
                 interface.operate(
@@ -371,32 +528,208 @@ impl<Message> IcedPane<Message> {
                     &mut iced_core::widget::operation::focusable::unfocus::<()>(),
                 );
             }
-            for event in events {
+            if gained_focus && !ui.input(|i| i.pointer.any_pressed()) {
+                let mut count = input::Focus::default();
+                interface.operate(&*renderer, &mut count);
+                let index = if self.tab_backwards {
+                    count.count.checked_sub(1)
+                } else {
+                    Some(0)
+                };
+                interface.operate(
+                    &*renderer,
+                    &mut input::Focus {
+                        set: Some(index),
+                        ..Default::default()
+                    },
+                );
+            }
+            if forward_input {
+                if (gained_focus || !self.window_focused) && window_focused {
+                    events.push(Event::Window(iced_core::window::Event::Focused).into());
+                }
+                if lost_focus || (self.window_focused && !window_focused) {
+                    events.push(Event::Window(iced_core::window::Event::Unfocused).into());
+                }
+                events.push(
+                    Event::Window(iced_core::window::Event::RedrawRequested(
+                        iced_core::time::Instant::now(),
+                    ))
+                    .into(),
+                );
+            }
+            self.window_focused = window_focused;
+            let mut entering_with_tab = gained_focus && !ui.input(|i| i.pointer.any_pressed());
+            let mut events: std::collections::VecDeque<_> = events.into();
+            while let Some(event) = events.pop_front() {
+                if let Event::Keyboard(iced_core::keyboard::Event::KeyPressed {
+                    key: iced_core::keyboard::Key::Named(iced_core::keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                }) = &event.event
+                {
+                    if entering_with_tab {
+                        entering_with_tab = false;
+                        continue;
+                    }
+                    let backwards = modifiers.shift();
+                    let mut count = input::Focus::default();
+                    interface.operate(&*renderer, &mut count);
+                    let target = match (count.focused, backwards) {
+                        (Some(index), true) => index.checked_sub(1),
+                        (Some(index), false) if index + 1 < count.count => Some(index + 1),
+                        (None, true) => count.count.checked_sub(1),
+                        (None, false) if count.count > 0 => Some(0),
+                        _ => None,
+                    };
+                    interface.operate(
+                        &*renderer,
+                        &mut input::Focus {
+                            set: Some(target),
+                            ..Default::default()
+                        },
+                    );
+                    if target.is_none() {
+                        self.pending_focus = Some(if backwards {
+                            egui::FocusDirection::Previous
+                        } else {
+                            egui::FocusDirection::Next
+                        });
+                        ui.ctx().request_repaint();
+                    }
+                    continue;
+                }
+
+                if self.overlay_bounds.is_some()
+                    && matches!(
+                        &event.event,
+                        Event::Keyboard(iced_core::keyboard::Event::KeyPressed {
+                            key: iced_core::keyboard::Key::Named(
+                                iced_core::keyboard::key::Named::Escape
+                            ),
+                            ..
+                        })
+                    )
+                {
+                    interface.update(
+                        &[Event::Mouse(mouse::Event::ButtonPressed(
+                            mouse::Button::Left,
+                        ))],
+                        mouse::Cursor::Unavailable,
+                        &mut *renderer,
+                        &mut clipboard,
+                        &mut messages,
+                    );
+                }
                 clipboard.begin_event(event.paste);
-                let (state, _) = interface.update(
+                let (state, statuses) = interface.update(
                     std::slice::from_ref(&event.event),
                     cursor,
                     &mut *renderer,
                     &mut clipboard,
                     &mut messages,
                 );
+                if matches!(
+                    event.event,
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle))
+                ) && focused
+                    && statuses
+                        .iter()
+                        .all(|status| *status == iced_core::event::Status::Ignored)
+                    && matches!(
+                        &state,
+                        user_interface::State::Updated {
+                            mouse_interaction: mouse::Interaction::Text,
+                            ..
+                        }
+                    )
+                    && let Some(text) = host.primary.borrow_mut().read()
+                {
+                    // Only text widgets get the fallback. A middle-click on a
+                    // button must never activate it as a synthetic left-click.
+                    let mut paste = vec![
+                        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)).into(),
+                        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)).into(),
+                    ];
+                    paste.extend(clipboard::translate(
+                        vec![egui::Event::Paste(text)],
+                        ui.input(|i| i.modifiers),
+                    ));
+                    for event in paste.into_iter().rev() {
+                        events.push_front(event);
+                    }
+                }
+                self.feedback(ui, &state);
                 if let user_interface::State::Outdated = state {
                     let cache = interface.into_cache();
-                    interface = UserInterface::build(view(), bounds, cache, &mut *renderer);
+                    interface = UserInterface::build(build(), bounds, cache, &mut *renderer);
                 }
             }
 
+            if select && focused && host.primary.borrow().provider.is_some() {
+                // Ask the focused widget for its selection. Secure inputs decline
+                // copying. This clipboard never emits standard clipboard output.
+                clipboard.selection_only = true;
+                for event in
+                    clipboard::translate(vec![egui::Event::Copy], ui.input(|i| i.modifiers))
+                {
+                    interface.update(
+                        &[event.event],
+                        cursor,
+                        &mut *renderer,
+                        &mut clipboard,
+                        &mut messages,
+                    );
+                }
+                clipboard.selection_only = false;
+                if clipboard.captured_selection != self.last_selection {
+                    if let Some(text) = &clipboard.captured_selection {
+                        host.primary.borrow_mut().write(text.clone());
+                    }
+                    self.last_selection = clipboard.captured_selection.take();
+                }
+            }
+            // update([]) computes overlay layout even on an otherwise idle frame.
+            let (state, _) =
+                interface.update(&[], cursor, &mut *renderer, &mut clipboard, &mut messages);
+            self.feedback(ui, &state);
             let style = renderer::Style {
                 text_color: self.theme.palette().text,
             };
             interface.draw(&mut *renderer, &self.theme, &style, cursor);
-            self.cache = Some(interface.into_cache());
-
             let clear_color = self.clear_color;
             let format = host.format;
-            let surface = self.ensure_surface(px);
+            let surface = Self::surface(&host, &mut self.surface, px);
             let viewport = Viewport::with_physical_size(Size::new(px[0], px[1]), ppp);
             renderer.present(clear_color, format, &surface.view, &viewport);
+            if forward_input && pass.active.get() {
+                pass.overlay.set(true);
+                interface.draw(&mut *renderer, &self.theme, &style, cursor);
+                let size = [
+                    (screen.width() * ppp).ceil().max(1.0) as u32,
+                    (screen.height() * ppp).ceil().max(1.0) as u32,
+                ];
+                let surface = Self::surface(&host, &mut self.overlay_surface, size);
+                renderer.present(
+                    Some(Color::TRANSPARENT),
+                    format,
+                    &surface.view,
+                    &Viewport::with_physical_size(Size::new(size[0], size[1]), ppp),
+                );
+                self.overlay_interactive = pass.interactive.get();
+                self.overlay_bounds = pass.bounds.get().map(|b| {
+                    egui::Rect::from_min_size(
+                        origin + egui::vec2(b.x, b.y),
+                        egui::vec2(b.width, b.height),
+                    )
+                });
+            } else {
+                self.overlay_bounds = None;
+                if let Some(surface) = self.overlay_surface.take() {
+                    Self::free_surface(&host, surface);
+                }
+            }
+            self.cache = Some(interface.into_cache());
 
             self.last_geometry = Some((px, ppp, rect.size()));
             self.redraw_requested = false;
@@ -410,6 +743,57 @@ impl<Message> IcedPane<Message> {
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+        }
+
+        if let Some(surface) = &self.overlay_surface {
+            ui.ctx()
+                .layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    response.id.with("iced_overlay"),
+                ))
+                .image(
+                    surface.egui_id,
+                    screen,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+        }
+        if forward_input
+            && (response.hovered() || overlay_response.as_ref().is_some_and(|r| r.hovered()))
+        {
+            ui.ctx()
+                .set_cursor_icon(input::cursor(self.mouse_interaction));
+        }
+        if focused
+            && window_focused
+            && let iced_core::InputMethod::Enabled {
+                cursor, preedit, ..
+            } = &self.input_method
+        {
+            let caret = egui::Rect::from_min_size(
+                origin + egui::vec2(cursor.x, cursor.y),
+                egui::vec2(cursor.width, cursor.height),
+            );
+            ui.ctx().output_mut(|output| {
+                output.ime = Some(egui::output::IMEOutput {
+                    rect,
+                    cursor_rect: caret,
+                });
+                output.mutable_text_under_cursor = true;
+            });
+            if let Some(preedit) = preedit
+                && !preedit.content.is_empty()
+            {
+                egui::Area::new(response.id.with("iced_preedit"))
+                    .order(egui::Order::Tooltip)
+                    .fixed_pos(caret.left_bottom())
+                    .interactable(false)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(egui::RichText::new(&preedit.content).underline());
+                        });
+                    });
+            }
         }
 
         IcedOutput {
@@ -427,7 +811,7 @@ impl<Message> IcedPane<Message> {
         rect: egui::Rect,
     ) -> (Vec<Event>, mouse::Cursor) {
         let mut events = Vec::new();
-        let hovered = response.hovered() || response.dragged();
+        let hovered = response.hovered() || response.dragged() || response.drag_stopped();
         let pointer_pos = ui.input(|i| i.pointer.latest_pos());
 
         let cursor_point = pointer_pos.map(|p| Point::new(p.x - rect.min.x, p.y - rect.min.y));
@@ -448,36 +832,21 @@ impl<Message> IcedPane<Message> {
                 self.last_cursor = Some(p);
             }
 
-            let (pressed, released, secondary_pressed, secondary_released, scroll) =
-                ui.input(|i| {
-                    (
-                        i.pointer.button_pressed(egui::PointerButton::Primary),
-                        i.pointer.button_released(egui::PointerButton::Primary),
-                        i.pointer.button_pressed(egui::PointerButton::Secondary),
-                        i.pointer.button_released(egui::PointerButton::Secondary),
-                        i.smooth_scroll_delta,
-                    )
-                });
-            if pressed {
-                events.push(Event::Mouse(mouse::Event::ButtonPressed(
-                    mouse::Button::Left,
-                )));
+            for (egui_button, iced_button) in [
+                (egui::PointerButton::Primary, mouse::Button::Left),
+                (egui::PointerButton::Secondary, mouse::Button::Right),
+                (egui::PointerButton::Middle, mouse::Button::Middle),
+                (egui::PointerButton::Extra1, mouse::Button::Other(4)),
+                (egui::PointerButton::Extra2, mouse::Button::Other(5)),
+            ] {
+                if ui.input(|i| i.pointer.button_pressed(egui_button)) {
+                    events.push(Event::Mouse(mouse::Event::ButtonPressed(iced_button)));
+                }
+                if ui.input(|i| i.pointer.button_released(egui_button)) {
+                    events.push(Event::Mouse(mouse::Event::ButtonReleased(iced_button)));
+                }
             }
-            if released {
-                events.push(Event::Mouse(mouse::Event::ButtonReleased(
-                    mouse::Button::Left,
-                )));
-            }
-            if secondary_pressed {
-                events.push(Event::Mouse(mouse::Event::ButtonPressed(
-                    mouse::Button::Right,
-                )));
-            }
-            if secondary_released {
-                events.push(Event::Mouse(mouse::Event::ButtonReleased(
-                    mouse::Button::Right,
-                )));
-            }
+            let scroll = ui.input(|i| i.smooth_scroll_delta);
             if scroll != egui::Vec2::ZERO {
                 events.push(Event::Mouse(mouse::Event::WheelScrolled {
                     delta: ScrollDelta::Pixels {
@@ -499,10 +868,9 @@ impl<Message> IcedPane<Message> {
 
     /// (Re)create the offscreen texture for `px` pixels and keep egui's
     /// registration of it current.
-    fn ensure_surface(&mut self, px: [u32; 2]) -> &Surface {
-        let stale = self.surface.as_ref().is_none_or(|s| s.size != px);
+    fn surface<'s>(host: &IcedHost, slot: &'s mut Option<Surface>, px: [u32; 2]) -> &'s Surface {
+        let stale = slot.as_ref().is_none_or(|s| s.size != px);
         if stale {
-            let host = &self.host;
             let texture = host.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("iced_egui pane"),
                 size: wgpu::Extent3d {
@@ -522,7 +890,7 @@ impl<Message> IcedPane<Message> {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
             let mut egui_renderer = host.egui_renderer.write();
-            let egui_id = match self.surface.take() {
+            let egui_id = match slot.take() {
                 Some(old) => {
                     egui_renderer.update_egui_texture_from_wgpu_texture(
                         &host.device,
@@ -541,25 +909,60 @@ impl<Message> IcedPane<Message> {
             };
             drop(egui_renderer);
 
-            self.surface = Some(Surface {
+            *slot = Some(Surface {
                 texture,
                 view,
                 size: px,
                 egui_id,
             });
         }
-        self.surface.as_ref().expect("surface just ensured")
+        slot.as_ref().expect("surface just ensured")
+    }
+    fn free_surface(host: &IcedHost, surface: Surface) {
+        host.egui_renderer.write().free_texture(&surface.egui_id);
+        surface.texture.destroy();
+    }
+    fn feedback(&mut self, ui: &egui::Ui, state: &user_interface::State) {
+        if let user_interface::State::Updated {
+            mouse_interaction,
+            redraw_request,
+            input_method,
+            ..
+        } = state
+        {
+            self.mouse_interaction = *mouse_interaction;
+            // Empty updates do not request IME; retain the redraw event's state.
+            if input_method.is_enabled() {
+                self.input_method = input_method.clone();
+            }
+            let now = iced_core::time::Instant::now();
+            let deadline = match redraw_request {
+                iced_core::window::RedrawRequest::NextFrame => Some(now),
+                iced_core::window::RedrawRequest::At(time) => Some(*time),
+                iced_core::window::RedrawRequest::Wait => None,
+            };
+            if let Some(deadline) = deadline {
+                self.scheduled_redraw = Some(
+                    self.scheduled_redraw
+                        .map_or(deadline, |old| old.min(deadline)),
+                );
+                ui.ctx()
+                    .request_repaint_after(deadline.saturating_duration_since(now));
+            }
+        }
     }
 }
 
 impl<Message> Drop for IcedPane<Message> {
     fn drop(&mut self) {
-        if let Some(surface) = self.surface.take() {
-            self.host
-                .egui_renderer
-                .write()
-                .free_texture(&surface.egui_id);
-            surface.texture.destroy();
+        for surface in [self.surface.take(), self.overlay_surface.take()]
+            .into_iter()
+            .flatten()
+        {
+            Self::free_surface(&self.host, surface);
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod integration_tests;
