@@ -1,0 +1,19 @@
+# Minimal eframe web app using iced_egui. Not part of the published crate.
+# Build with `trunk serve` from this directory (needs `cargo install trunk`
+# and the wasm32-unknown-unknown target).
+[package]
+name = "iced_egui_web_demo"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+iced_egui = { path = "..", features = ["fira-sans", "webgl"] }
+# default-features = false is load-bearing: eframe's defaults enable wgpu's
+# fragile-send-sync-non-atomic-wasm, under which iced_wgpu does not compile.
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts"] }
+egui = "0.33"
+iced_widget = "0.14"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement"] }

@@ -1,0 +1,58 @@
+[package]
+name = "iced_egui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Render Iced widget trees inside egui, on egui's own wgpu device, via egui-wgpu"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DaveWK/iced_egui"
+readme = "README.md"
+keywords = ["egui", "iced", "wgpu", "gui", "plotters"]
+categories = ["gui", "graphics", "rendering"]
+exclude = ["/.github", "/web-demo"]
+
+[features]
+default = []
+plotters = ["dep:plotters", "dep:plotters-iced2"]
+## wgpu's WebGL2 fallback for browsers without WebGPU (forwards to iced and wgpu).
+webgl = ["iced_renderer/webgl", "wgpu/webgl"]
+## Ship Fira Sans inside the binary so Iced text renders where there are no
+## system fonts (wasm). Forwards to `iced_renderer/fira-sans`.
+fira-sans = ["iced_renderer/fira-sans"]
+
+[dependencies]
+egui = "0.33"
+# No default features: egui-wgpu's defaults enable wgpu's
+# `fragile-send-sync-non-atomic-wasm`, which makes wgpu demand `Send + Sync`
+# window handles on wasm32, and iced_wgpu's compositor deliberately does not
+# provide them there. Downstream web builds must keep that feature off too
+# (eframe: `default-features = false, features = ["wgpu"]`).
+egui-wgpu = { version = "0.33", default-features = false }
+wgpu = "27"
+iced_core = "0.14"
+iced_graphics = { version = "0.14", features = ["geometry"] }
+iced_runtime = "0.14"
+iced_widget = { version = "0.14", features = ["canvas"] }
+iced_wgpu = { version = "0.14", features = ["geometry"] }
+# `wgpu-bare` and *no* `tiny-skia`: that is what makes
+# `iced_widget::renderer::Renderer` resolve to `iced_wgpu::Renderer`.
+iced_renderer = { version = "0.14", default-features = false, features = ["wgpu-bare", "geometry"] }
+
+plotters = { version = "0.3", optional = true, default-features = false }
+plotters-iced2 = { version = "0.14", optional = true }
+
+[dev-dependencies]
+pollster = "0.4"
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+plotters = { version = "0.3", default-features = false, features = ["line_series", "area_series"] }
+plotters-iced2 = "0.14"
+env_logger = "0.11"
+egui_tiles = "0.14"
+
+[[example]]
+name = "plotters"
+required-features = ["fira-sans", "plotters"]
+
+[[example]]
+name = "widgets"
+required-features = ["fira-sans"]
